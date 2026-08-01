@@ -1,0 +1,22 @@
+{
+  "name": "ai-product-matching-prototype",
+  "version": "1.0.0",
+  "description": "A narrow prototype testing one specific question: **can an LLM reliably map messy, typo'd, dialect Arabic customer text to real products in a database?**",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@github-anas-refat-dev:anas-refat-dev/ai-product-matching-prototype.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "dotenv": "^17.4.2",
+    "pg": "^8.22.0"
+  }
+}
