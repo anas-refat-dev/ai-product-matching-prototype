@@ -31,13 +31,19 @@ ai-product-matching-prototype/
 │   ├── seed.js            # applies schema.sql + inserts catalog-data.js, normalized
 │   └── pool.js            # shared Postgres connection pool
 ├── lib/
-│   ├── matching.js        # normalization + fuzzy search against real catalog (in progress — see Status)
+│   ├── matching.js        # normalization, fuzzy product search, alias fallback, variant narrowing — see Status
 │   └── llm.js             # tool-calling loop: raw text -> structured search calls (not started yet)
-├── test-cases.json        # ~25 real test messages with expected outcomes
-├── run-tests.js           # runs all test cases, prints JSON, scores pass/fail
+├── short-circuit-test.js     # manual test: exact/normalized matches, false-positive check
+├── alias-fallback-test.js    # manual test: alias-only words (حليب, ميلك, طحين, etc.)
+├── typo-severity-test.js     # manual test: how bad can a product-name typo get before matching fails
+├── narrow-variant-test.js    # manual test: brand/size narrowing scenarios
+├── test-cases.json        # ~25 real test messages with expected outcomes (not built yet)
+├── run-tests.js           # runs all test cases, prints JSON, scores pass/fail (not built yet)
 ├── design-note.md         # full design decisions and reasoning
 └── README.md
 ```
+
+> The `*-test.js` files in the root are quick manual verification scripts written while building `matching.js` piece by piece — not the final automated suite. `test-cases.json` + `run-tests.js` (still to be built) are the real end-to-end evaluation once `lib/llm.js` exists.
 
 ## Setup
 
@@ -101,8 +107,9 @@ Prints each test case's input, extracted items, matched outcome, and whether it 
 - [x] Real catalog seeded (10 products, aliases, variants — normalized at seed time)
 - [x] Arabic normalization function (`normalizeArabic`) — verified working
 - [x] Name-first fuzzy search with high-confidence short-circuit (`findProduct`) — verified against exact matches, normalization variants, and a false-positive sanity check
-- [ ] Alias fallback (catches genuine typos of the product name itself and synonym/transliteration aliases — currently returns `not_found` for these cases, expected at this stage)
-- [ ] Brand/size narrowing within a matched product's variants
+- [x] Alias fallback (`mergeTwoCandidates`) — catches genuine typos of the product name itself and synonym/transliteration aliases (حليب, ميلك, طحين, etc.)
+- [x] Brand/size narrowing within a matched product's variants (`narrowVariant`, `fuzzyMatchBrand`) — never dead-ends on a bad brand/size guess, falls back to showing all variants instead
+- [ ] Known gap: severe brand-level typos (e.g. "جبيته" for "جهينة") aren't caught by fuzzy matching alone — planned fix is an LLM-proposed `likely_correction` merged in via `mergeTwoCandidates`, see design note Section 4
 - [ ] LLM tool-calling integration (`lib/llm.js`)
 - [ ] Full test suite (`test-cases.json` + `run-tests.js`)
 
