@@ -1,4 +1,4 @@
-const { findProduct } = require("./lib/matching");
+const { findProduct, closeConnections } = require("./lib/matching");
 
 async function main() {
   const tests = [
@@ -39,6 +39,7 @@ async function main() {
     const result = await findProduct(t.input);
     console.log(`${t.input} → expected: ${t.expect} → got:`, result);
   }
+  await closeConnections();
 }
 
 main();
