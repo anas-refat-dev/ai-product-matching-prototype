@@ -1,6 +1,8 @@
 # Design Note — AI Product Matching Prototype
 **Scope:** narrow test of one thing only — can the AI reliably map messy Arabic/mixed customer text to real products? No cart, no order, no delivery, no multi-store, no admin UI.
-**Stack:** Node.js + PostgreSQL (with `pg_trgm`) + Anthropic API (tool calling).
+**Stack:** Node.js + PostgreSQL (with `pg_trgm`) + Google Gemini API (function calling).
+
+**Provider note:** originally planned around the Anthropic API (tool-calling shape shown in earlier drafts of this note); switched to Google Gemini (`gemini-3-flash`) for its free tier (generous enough for this prototype's usage — see README) and competitive Arabic-language benchmark performance. The core design (never trust unverified facts, raw-text extraction, real-data verification via `searchProducts`) is provider-agnostic and applies unchanged; only the request/response wire format in Section 3 is Gemini-specific.
 
 ---
 
@@ -62,29 +64,31 @@ Without this, legitimate Arabic spelling variation (e.g. "جهينة" vs "جهي
 
 ---
 
-## 3. The `search_products` tool definition
+## 3. The `search_products` tool definition (Gemini function-calling shape)
+
+Sent as part of the request body under `tools[0].functionDeclarations`. Note Gemini's schema uses **uppercase** type names (`OBJECT`, `STRING`, `NUMBER`, `INTEGER`) — different convention from Anthropic/OpenAI's lowercase, easy to get wrong if copying from other providers' docs.
 
 ```json
 {
   "name": "search_products",
   "description": "Search for a product the customer wants, with optional brand/size if mentioned.",
-  "input_schema": {
-    "type": "object",
+  "parameters": {
+    "type": "OBJECT",
     "properties": {
       "product_query": {
-        "type": "string",
+        "type": "STRING",
         "description": "The core item name AS THE CUSTOMER WROTE IT, raw, uncorrected (e.g. 'لبب', not 'لبن')."
       },
       "brand": {
-        "type": "string",
+        "type": "STRING",
         "description": "Brand mentioned, if any, raw as written. Omit if not mentioned."
       },
       "size": {
-        "type": "number",
+        "type": "NUMBER",
         "description": "Just the numeric amount, if mentioned (e.g. 1, 1.5, 400). The unit is fixed per product and never needs to be extracted or provided by the customer — omit this field if no amount was mentioned."
       },
       "qty": {
-        "type": "integer",
+        "type": "INTEGER",
         "description": "How many of this item. Default 1 if not stated."
       }
     },
@@ -92,6 +96,13 @@ Without this, legitimate Arabic spelling variation (e.g. "جهينة" vs "جهي
   }
 }
 ```
+
+**Request/response mechanics, Gemini-specific:**
+- Endpoint: `POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent?key=API_KEY`
+- System prompt goes in `systemInstruction.parts[0].text`; the customer message goes in `contents[0].parts[0].text` with `role: "user"`.
+- Gemini can return **multiple `functionCall` parts in one response** (inside `candidates[0].content.parts[]`) — this is what handles multi-item messages like "لبن وبيض" in a single request, no special looping-per-item needed on the request side.
+- No `tool_use_id`/round-trip concept needed here: since this prototype's output is structured JSON (not a phrased conversational reply), one request is enough — read the `functionCall` parts, run `searchProducts` for real against each, assemble the JSON output directly. No need to send results back to Gemini for a second "final answer" turn.
+- Free tier (`gemini-3-flash`) has rate limits (~5–15 requests/minute, ~1,000/day) — comfortably enough for this prototype's test-suite scale, but worth a small delay between calls if `run-tests.js` fires everything back-to-back.
 
 **Backend verification steps on every call (the LLM's extraction is a guess, not a fact):**
 1. Fuzzy-match `product_query` (normalized) against `products` (normalized) via `word_similarity()` → candidate product(s). **Implementation note:** search products by name first with a high-confidence threshold (short-circuit if cleared); only fall back to also searching `product_aliases` and merging results if the name-only check doesn't clear that threshold. See Section 4 for why this ordering is safe and where it needs care (very short product names).

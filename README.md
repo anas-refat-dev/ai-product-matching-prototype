@@ -17,7 +17,7 @@ Full design rationale (schema, tool definition, normalization rules, output form
 
 - **Node.js** (18+)
 - **PostgreSQL** with the `pg_trgm` extension (fuzzy/trigram text matching), installed natively (not via Docker)
-- **Anthropic API** (Claude, via tool/function calling) for extracting structured intent from raw customer text
+- **Google Gemini API** (`gemini-3-flash`, via function calling) for extracting structured intent from raw customer text — chosen for its free tier (no billing required) and strong Arabic-language benchmark performance; see design note Section 3 for the request/response shape
 
 > Note: since Postgres is installed natively rather than in a container, it runs as a persistent system service in the background (`sudo systemctl status postgresql` to check, `stop`/`start` to pause/resume it).
 
@@ -37,6 +37,8 @@ ai-product-matching-prototype/
 ├── alias-fallback-test.js    # manual test: alias-only words (حليب, ميلك, طحين, etc.)
 ├── typo-severity-test.js     # manual test: how bad can a product-name typo get before matching fails
 ├── narrow-variant-test.js    # manual test: brand/size narrowing scenarios
+├── search-products-test.js   # manual test: full searchProducts integration, all four outcome types
+├── applicability-notes-test.js  # manual test: brand/size "not applicable" notes + confidence guard
 ├── test-cases.json        # ~25 real test messages with expected outcomes (not built yet)
 ├── run-tests.js           # runs all test cases, prints JSON, scores pass/fail (not built yet)
 ├── design-note.md         # full design decisions and reasoning
@@ -70,7 +72,7 @@ sudo -u postgres psql
 
 # 5. Copy .env.example to .env and fill in your values
 cp .env.example .env
-# then edit .env: add your ANTHROPIC_API_KEY and DATABASE_URL
+# then edit .env: add your GEMINI_API_KEY (free, from aistudio.google.com) and DATABASE_URL
 # DATABASE_URL=postgresql://postgres:devpassword@localhost:5432/grocery_proto
 
 # 6. Sanity check pg_trgm is enabled
@@ -109,8 +111,11 @@ Prints each test case's input, extracted items, matched outcome, and whether it 
 - [x] Name-first fuzzy search with high-confidence short-circuit (`findProduct`) — verified against exact matches, normalization variants, and a false-positive sanity check
 - [x] Alias fallback (`mergeTwoCandidates`) — catches genuine typos of the product name itself and synonym/transliteration aliases (حليب, ميلك, طحين, etc.)
 - [x] Brand/size narrowing within a matched product's variants (`narrowVariant`, `fuzzyMatchBrand`) — never dead-ends on a bad brand/size guess, falls back to showing all variants instead
+- [x] `searchProducts` — combines `findProduct` + `narrowVariant` into the single entry point `llm.js` will call; adds a fourth outcome type, `product_ambiguous`, for when the product identity itself (not just brand/size) is unresolved
+- [x] `notes` field (`brand_not_applicable` / `size_not_applicable`) — acknowledges when the customer mentioned a brand/size that genuinely doesn't apply to a product, instead of silently dropping it
+- [x] Confidence guard — prevents `narrowVariant`'s never-dead-end fallback from reporting `confident_match` off a single-variant product when the underlying product-level match was itself only a weak guess (found via real testing: "بيت" + a brand was confidently but wrongly resolving to "بيض")
 - [ ] Known gap: severe brand-level typos (e.g. "جبيته" for "جهينة") aren't caught by fuzzy matching alone — planned fix is an LLM-proposed `likely_correction` merged in via `mergeTwoCandidates`, see design note Section 4
-- [ ] LLM tool-calling integration (`lib/llm.js`)
+- [ ] LLM tool-calling integration (`lib/llm.js`) — provider: Google Gemini (`gemini-3-flash`), function-calling shape documented in design note Section 3
 - [ ] Full test suite (`test-cases.json` + `run-tests.js`)
 
 ## Related documents
