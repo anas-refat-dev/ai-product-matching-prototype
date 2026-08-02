@@ -26,11 +26,13 @@ Full design rationale (schema, tool definition, normalization rules, output form
 ```
 ai-product-matching-prototype/
 ├── db/
-│   ├── schema.sql        # products, product_variants, product_aliases
-│   └── seed.js           # populates a small real catalog for testing
+│   ├── schema.sql         # products, product_variants, product_aliases
+│   ├── catalog-data.js    # real seed catalog (products, aliases, variants)
+│   ├── seed.js            # applies schema.sql + inserts catalog-data.js, normalized
+│   └── pool.js            # shared Postgres connection pool
 ├── lib/
-│   ├── matching.js        # normalization + fuzzy search against real catalog
-│   └── llm.js             # tool-calling loop: raw text -> structured search calls
+│   ├── matching.js        # normalization + fuzzy search against real catalog (in progress — see Status)
+│   └── llm.js             # tool-calling loop: raw text -> structured search calls (not started yet)
 ├── test-cases.json        # ~25 real test messages with expected outcomes
 ├── run-tests.js           # runs all test cases, prints JSON, scores pass/fail
 ├── design-note.md         # full design decisions and reasoning
@@ -92,7 +94,17 @@ Prints each test case's input, extracted items, matched outcome, and whether it 
 
 ## Status
 
-🚧 In progress — environment setup phase.
+🚧 In progress.
+
+- [x] Environment set up (Node, PostgreSQL native install, dependencies)
+- [x] Schema designed and applied (`products` / `product_variants` / `product_aliases`, `pg_trgm` enabled)
+- [x] Real catalog seeded (10 products, aliases, variants — normalized at seed time)
+- [x] Arabic normalization function (`normalizeArabic`) — verified working
+- [x] Name-first fuzzy search with high-confidence short-circuit (`findProduct`) — verified against exact matches, normalization variants, and a false-positive sanity check
+- [ ] Alias fallback (catches genuine typos of the product name itself and synonym/transliteration aliases — currently returns `not_found` for these cases, expected at this stage)
+- [ ] Brand/size narrowing within a matched product's variants
+- [ ] LLM tool-calling integration (`lib/llm.js`)
+- [ ] Full test suite (`test-cases.json` + `run-tests.js`)
 
 ## Related documents
 

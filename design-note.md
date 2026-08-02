@@ -11,15 +11,15 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE TABLE products (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    name_ar TEXT NOT NULL,
-    name_en TEXT
+    name TEXT NOT NULL
 );
 
 CREATE TABLE product_variants (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     product_id INTEGER REFERENCES products(id),
-    brand TEXT,          -- plain text, e.g. "جهينة"
-    size TEXT,           -- plain text, e.g. "1.5L"
+    brand TEXT,          -- plain text, e.g. "جهينة", nullable for unbranded products
+    size NUMERIC,         -- just the number, e.g. 1, 1.5, 400 — nullable for products with no meaningful size (e.g. eggs)
+    unit TEXT,            -- "L", "kg", "g" — fixed per product, for DISPLAY only, never parsed from or matched against customer input
     price NUMERIC NOT NULL
 );
 
@@ -30,13 +30,14 @@ CREATE TABLE product_aliases (
 );
 
 -- Trigram index for fast fuzzy search on the small products table
-CREATE INDEX idx_products_name_trgm ON products USING gin (name_ar gin_trgm_ops);
-CREATE INDEX idx_aliases_text_trgm ON product_aliases USING gin (alias_text gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_products_name_trgm ON products USING gin (name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_aliases_text_trgm ON product_aliases USING gin (alias_text gin_trgm_ops);
 ```
 
 **Why this shape (recap of the reasoning):**
-- `products` is the small, deduplicated "what" list — this is what gets fuzzy-searched, which is why matching typos against it is reliable (comparing against ~15–20 short names, not hundreds of long variant descriptions).
-- `product_variants` holds brand/size/price as plain columns — never fuzzy-searched on their own; once the product is identified, variants are just filtered/listed, which is why this step can't really go wrong the way fuzzy search can. (No `stock` field for this prototype — availability isn't part of what's being tested.)
+- `products` is the small, deduplicated "what" list — this is what gets fuzzy-searched, which is why matching typos against it is reliable (comparing against ~15–20 short names, not hundreds of long variant descriptions). Single `name` field only (Arabic-only app, no need for a separate English column).
+- `product_variants` holds brand/size/unit/price as plain columns — never fuzzy-searched on their own; once the product is identified, variants are just filtered/listed, which is why this step can't really go wrong the way fuzzy search can. (No `stock` field for this prototype — availability isn't part of what's being tested.)
+- **`size` is a number, `unit` is fixed metadata, not customer input.** A given product realistically only comes in one unit type (milk is always liters, rice/flour/sugar always kilos) — so the customer only ever needs to say *how much* (a plain number), never the unit itself. This removes an entire normalization concern (no لتر/كيلو ↔ L/kg mapping needed at all) compared to an earlier version of this design that treated size as free text.
 - `product_aliases` is attached to `products`, so one alias (e.g. "لبب" → لبن) covers every brand/size at once, instead of needing to be duplicated per variant.
 - `GENERATED ALWAYS AS IDENTITY` is used instead of the older `SERIAL` shorthand — same auto-incrementing behavior, but it's the modern SQL-standard syntax and prevents the sequence-desync bug class that `SERIAL` allows if an explicit id is ever inserted.
 
@@ -55,15 +56,9 @@ Before storing or searching any Arabic text, run it through this normalization �
 
 Without this, legitimate Arabic spelling variation (e.g. "جهينة" vs "جهينه") lowers match scores for no real reason — this isn't a threshold-tuning problem, it's a missing normalization step.
 
-### Unit normalization (separate from character normalization, needed for `size` matching)
+**Implementation choice: normalize at seed time, not query time.** Rather than normalizing the stored text on every query (e.g. via SQL `translate()`), catalog data is normalized once when it's inserted (`seed.js` runs `normalizeArabic()` on `name`, `alias_text`, `brand`, and `unit` before insertion — with a null-safe guard, since several fields are nullable). This means stored data no longer shows its "original" spelling (e.g. "مكرونة" is stored as "مكرونه") — a real, accepted tradeoff for simpler queries at prototype scale. The incoming customer query is still normalized the same way at search time, so both sides stay consistent.
 
-Sizes given in Arabic text ("1 لتر", "1 كيلو") need to match stored variant sizes even if those are stored in Latin abbreviated form ("1L", "1kg") — a literal string comparison between the two fails even though they mean the same thing. Apply a small unit-mapping step before comparing `size`:
-
-- لتر / لتر ↔ L
-- كيلو / كيلوجرام ↔ kg
-- (extend this list as new units show up in real test cases)
-
-This is a lookup/mapping table, not fuzzy matching — units are a small closed set, so exact mapping is more reliable than similarity scoring here.
+**Note on unit text:** an earlier version of this design also planned a unit-normalization step (لتر/كيلو ↔ L/kg mapping) for matching customer-provided size text. That's no longer needed — see the updated schema above, where `unit` is fixed per-variant metadata, never parsed from customer input at all. The customer only ever provides a plain number.
 
 ---
 
@@ -85,8 +80,8 @@ This is a lookup/mapping table, not fuzzy matching — units are a small closed 
         "description": "Brand mentioned, if any, raw as written. Omit if not mentioned."
       },
       "size": {
-        "type": "string",
-        "description": "Size/quantity unit mentioned, if any, raw as written. Omit if not mentioned."
+        "type": "number",
+        "description": "Just the numeric amount, if mentioned (e.g. 1, 1.5, 400). The unit is fixed per product and never needs to be extracted or provided by the customer — omit this field if no amount was mentioned."
       },
       "qty": {
         "type": "integer",
@@ -99,9 +94,9 @@ This is a lookup/mapping table, not fuzzy matching — units are a small closed 
 ```
 
 **Backend verification steps on every call (the LLM's extraction is a guess, not a fact):**
-1. Fuzzy-match `product_query` (normalized) against `products` (normalized) via `word_similarity()` → candidate product(s).
+1. Fuzzy-match `product_query` (normalized) against `products` (normalized) via `word_similarity()` → candidate product(s). **Implementation note:** search products by name first with a high-confidence threshold (short-circuit if cleared); only fall back to also searching `product_aliases` and merging results if the name-only check doesn't clear that threshold. See Section 4 for why this ordering is safe and where it needs care (very short product names).
 2. If `brand` given: fuzzy-match against the actual brand values present on that product's variants only.
-3. If `size` given: normalize units, then match against actual size values on those variants.
+3. If `size` given: compare directly as a number against the actual `size` values on those variants (no unit conversion needed — `unit` is fixed metadata, not customer input).
 4. All three resolve to exactly one real variant row → confident match, no clarification needed.
    Otherwise → return the real candidate list for the AI to present or ask about.
 
@@ -115,11 +110,21 @@ Customer: عايز لبن جبيته
 AI:       تمام، عايز لبن جهينة. حجم ايه؟ في 1 لتر وفي 1.5 لتر
 ```
 
-Here `product_query` ("لبن") and `brand` ("جبيته" → fuzzy-matched to "جهينة") both resolved; only `size` is missing. The response reflects that back explicitly ("تمام، عايز لبن جهينة") before asking — this confirms to the customer that their typo'd brand was understood correctly, then asks only about the one genuinely missing slot, listing the real sizes available for that specific product+brand combination (not sizes across all brands). This is the pattern to follow for every `clarification_needed` case: state what's confirmed, ask only about `missing_slot`, and populate options from the already-narrowed candidate list, never the full unfiltered catalog.
+Here `product_query` ("لبن") and `brand` ("جبيته" → fuzzy-matched to "جهينة") both resolved; only `size` is missing. The response reflects that back explicitly ("تمام، عايز لبن جهينة") before asking — this confirms to the customer that their typo'd brand was understood correctly, then asks only about the one genuinely missing slot, listing the real sizes (with their fixed unit, e.g. "1 لتر" built from `size: 1, unit: "L"`) available for that specific product+brand combination (not sizes across all brands). This is the pattern to follow for every `clarification_needed` case: state what's confirmed, ask only about `missing_slot`, and populate options from the already-narrowed candidate list, never the full unfiltered catalog.
 
 ---
 
-## 4. JSON output shape
+## 4. Matching strategy: name-first short-circuit, alias fallback
+
+**Implemented:** search `products.name` first via `word_similarity()`. If the top score clears a high-confidence threshold (starting point: `0.8`, tune empirically — see caution below), return that match immediately without checking aliases at all — checking aliases afterward couldn't produce a better answer once you're already confident, so skipping it is a pure optimization, not a correctness compromise.
+
+**Caution specific to this catalog:** several product names are very short (رز, بيض, شاي — 2-3 characters). Trigram/word-similarity scores on short strings are noisier than on longer ones, since a couple of shared characters make up a much bigger fraction of the string. Don't assume a threshold tuned on longer words is automatically safe for these — verify empirically with real test cases (a deliberately unrelated word, e.g. موبايل, should never accidentally clear the threshold against any short product name).
+
+**Not yet implemented (in progress):** when the name-only check doesn't clear the threshold, fall back to also searching `product_aliases`, merge both result sets by `product_id` (keeping the higher score where a product appears in both), and use the merged best result. This is what's needed to catch genuine typos of the product name itself (لبب → لبن) and synonym/transliteration aliases (حليب, ميلك, طحين) — both currently return `not_found` until this fallback exists, which is expected, not a bug, at this stage of the build.
+
+---
+
+## 5. JSON output shape
 
 ```json
 {
@@ -131,14 +136,14 @@ Here `product_query` ("لبن") and `brand` ("جبيته" → fuzzy-matched to "
       "outcome": "clarification_needed",
       "missing_slot": "brand",
       "candidates": [
-        {"product": "لبن", "brand": "جهينة", "size": "1.5L", "price": 22, "score": 0.33},
-        {"product": "لبن", "brand": "المراعي", "size": "1.5L", "price": 20, "score": 0.31}
+        {"product": "لبن", "brand": "جهينة", "size": 1.5, "unit": "L", "price": 22, "score": 0.33},
+        {"product": "لبن", "brand": "المراعي", "size": 1.5, "unit": "L", "price": 20, "score": 0.31}
       ]
     },
     {
       "query": "بيض",
       "outcome": "confident_match",
-      "matched_variant": {"product": "بيض", "brand": null, "size": "unit", "price": 5.5}
+      "matched_variant": {"product": "بيض", "brand": null, "size": null, "unit": null, "price": 3.5}
     }
   ]
 }
@@ -148,7 +153,7 @@ Here `product_query` ("لبن") and `brand` ("جبيته" → fuzzy-matched to "
 
 ---
 
-## 5. Test case categories (write these before touching AI code)
+## 6. Test case categories (write these before touching AI code)
 
 Aim for 20–30 total messages, covering:
 - Clean, correct input (should be `confident_match`)
@@ -159,13 +164,15 @@ Aim for 20–30 total messages, covering:
 - Multiple items in one message (لبن وبيض وعيش — each item scored independently)
 - Multi-item stress test with varying detail per item, exercising scoped/partial clarification (e.g. "عايز لبب 1 لتر و 3 بيضات و رز المنار و دقيق المنار 1 كيلو" — one item needs only a brand clarification despite giving size, one is a clean multi-slot match, one is fully unresolved/`not_found`, one is a plural form of a known product)
 - Plural/morphological variation of a known product (بيضات for بيض) — distinct from typos or dialect synonyms, worth confirming trigram similarity handles this correctly rather than assuming it
+- Normalization-variant spelling of a known product name (e.g. شاى vs شاي, جبنه vs جبنة) — should score ~1.0 after normalization; if it doesn't, that's a normalization bug, not a fuzzy-matching tuning issue
+- False-positive sanity check — a clearly unrelated word (e.g. موبايل) should never match anything, regardless of threshold; useful for catching an overly loose threshold especially given several very short product names in this catalog
 - Out-of-catalog item (e.g. بيبسي if not stocked — should be `not_found`, not a forced bad match)
 
 Each test case: `{ "input": "...", "expected_outcome": "confident_match" | "clarification_needed" | "not_found" }`
 
 ---
 
-## 6. Build order (do not reorder — each step should work in isolation before the next)
+## 7. Build order (do not reorder — each step should work in isolation before the next)
 
 1. Schema + seed script (15–20 real products, Arabic names, manual aliases) → verify data by eye in a DB GUI.
 2. Normalization function + fuzzy search (`word_similarity` query), tested directly with hardcoded strings — **no AI yet**.
